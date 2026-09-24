@@ -21,18 +21,22 @@ from rclpy.node import Node
 from geometry_msgs.msg import PolygonStamped
 
 from ble_server.ble_interface import IBleGattServer
-from ble_server.bluez_server import BluezBleGattServer
+from ble_server.bluez_server import RESPONSE_ACK, RESPONSE_NACK, BluezBleGattServer
+from ble_server.chunk_assembler import AssemblerOverflowError, ChunkAssembler
 from ble_server.converter import IPayloadConverter, JsonPolygonConverter
 
 
 class BleReceiverNode(Node):
     """BLE 経由で清掃エリアを受信・発行する ROS 2 ノード"""
 
-    def __init__(self, ble_server: IBleGattServer, converter: IPayloadConverter) -> None:
+    def __init__(
+        self,
+        ble_server: IBleGattServer,
+        converter: IPayloadConverter | None = None,
+    ) -> None:
         super().__init__('ble_receiver_node')
 
         self._ble_server = ble_server
-        self._converter = converter
 
         # 1. ROS 2 パラメータ宣言
         self.declare_parameter('topic_name', '/cleaning_zone')
@@ -41,6 +45,16 @@ class BleReceiverNode(Node):
 
         topic_name = self.get_parameter('topic_name').get_parameter_value().string_value
         default_frame_id = self.get_parameter('default_frame_id').get_parameter_value().string_value
+        max_coord = self.get_parameter('max_coord_limit_m').get_parameter_value().double_value
+
+        # converter未指定時はノードパラメータで構築する
+        # (max_coord_limit_m が実際に効くようにするため)
+        self._converter = converter or JsonPolygonConverter(
+            default_frame_id=default_frame_id,
+            max_coord_abs_val=max_coord,
+        )
+        # チャンク再構成 (アプリはJSON+改行をMTU分割送信する)
+        self._assembler = ChunkAssembler()
 
         # 2. Publisher 生成 (QoS 信頼性重視: Depth 10)
         self._zone_pub = self.create_publisher(PolygonStamped, topic_name, 10)
@@ -51,11 +65,28 @@ class BleReceiverNode(Node):
         self._ble_server.set_on_data_received_callback(self._on_ble_data_received)
 
     def _on_ble_data_received(self, raw_bytes: bytes) -> None:
-        """BLE サーバーから生バイト列を受信した際のイベントハンドラ"""
-        self.get_logger().info(f"📥 BLEデータ受信: {len(raw_bytes)} bytes")
+        """BLE WriteValue受信ハンドラ。チャンクを蓄積し、完成フレームのみ処理する。"""
+        try:
+            frames = self._assembler.feed(raw_bytes)
+        except AssemblerOverflowError as e:
+            self.get_logger().error(f'受信バッファ溢れのため破棄します: {e}')
+            self._ble_server.set_response(RESPONSE_NACK)
+            return
+        if not frames:
+            return  # まだ断片のみ。続きを待つ
+        ok = True
+        for frame in frames:
+            if not self._handle_frame(frame):
+                ok = False
+        # アプリは送信後に応答characteristicをreadする
+        self._ble_server.set_response(RESPONSE_ACK if ok else RESPONSE_NACK)
+
+    def _handle_frame(self, frame: bytes) -> bool:
+        """完成した1フレームを変換・配信する。成功時True。"""
+        self.get_logger().info(f'📥 フレーム受信: {len(frame)} bytes')
 
         current_time = self.get_clock().now().to_msg()
-        polygon_msg = self._converter.convert_cleaning_zone(raw_bytes, stamp=current_time)
+        polygon_msg = self._converter.convert_cleaning_zone(frame, stamp=current_time)
 
         if polygon_msg is not None:
             self._zone_pub.publish(polygon_msg)
@@ -64,8 +95,9 @@ class BleReceiverNode(Node):
             self.get_logger().info(
                 f"📢 清掃エリア配信完了: トピック='{self._zone_pub.topic_name}', 頂点数={points_count}, frame='{frame_id}'"
             )
-        else:
-            self.get_logger().error("❌ 受信データのパース・検証に失敗したため、トピックへの配信を中断しました。")
+            return True
+        self.get_logger().error("❌ 受信データのパース・検証に失敗したため、トピックへの配信を中断しました。")
+        return False
 
 
 class BleServerManager:

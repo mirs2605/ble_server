@@ -18,15 +18,22 @@ from .ble_interface import IBleGattServer, RawDataCallback
 
 logger = logging.getLogger(__name__)
 
-# デフォルト UUID
+# デフォルト UUID (アプリ側 BleUuids と一致させること)
 DEFAULT_SERVICE_UUID      = "12345678-1234-1234-1234-123456789abc"
 DEFAULT_CHAR_MISSION_UUID = "12345678-1234-1234-1234-123456789abd"
+DEFAULT_CHAR_RESPONSE_UUID = "12345678-1234-1234-1234-123456789abe"
 DEFAULT_DEVICE_NAME       = "MIRS-Robot"
+
+#: 応答値。アプリは送信後に response characteristic を read し、
+#: b'ACK' 以外を拒否扱いにする
+RESPONSE_ACK = b"ACK"
+RESPONSE_NACK = b"NACK"
 
 # D-Bus オブジェクトパス
 BASE_APP_PATH  = "/com/mirs/app"
 SERVICE_PATH   = f"{BASE_APP_PATH}/service0"
 CHAR_PATH      = f"{SERVICE_PATH}/char0"
+RESP_PATH      = f"{SERVICE_PATH}/char1"
 ADV_PATH       = "/com/mirs/advertisement0"
 
 
@@ -90,6 +97,39 @@ class GattCharacteristic1Interface(ServiceInterface):
         return ["write"]
 
 
+class GattResponseCharacteristic1Interface(ServiceInterface):
+    """応答用キャラクタリスティック (read専用)。
+
+    アプリはミッション送信後にここをreadし、b'ACK' 以外を拒否扱いにする。
+    受信処理の成否は BluezBleGattServer.set_response() で反映させる。
+    """
+
+    def __init__(self, char_uuid: str, service_path: str) -> None:
+        super().__init__("org.bluez.GattCharacteristic1")
+        self._uuid = char_uuid
+        self._service_path = service_path
+        self._value = RESPONSE_NACK
+
+    def set_value(self, value: bytes) -> None:
+        self._value = bytes(value)
+
+    @method()
+    def ReadValue(self, options: "a{sv}") -> "ay":  # type: ignore[override]
+        return list(self._value)
+
+    @dbus_property(PropertyAccess.READ)
+    def UUID(self) -> "s":  # type: ignore[override]
+        return self._uuid
+
+    @dbus_property(PropertyAccess.READ)
+    def Service(self) -> "o":  # type: ignore[override]
+        return self._service_path
+
+    @dbus_property(PropertyAccess.READ)
+    def Flags(self) -> "as":  # type: ignore[override]
+        return ["read"]
+
+
 class LeAdvertisement1Interface(ServiceInterface):
     """org.bluez.LEAdvertisement1 実装 (BLE 探索用)"""
 
@@ -122,16 +162,19 @@ class BluezBleGattServer(IBleGattServer):
         self,
         service_uuid: str = DEFAULT_SERVICE_UUID,
         char_uuid: str = DEFAULT_CHAR_MISSION_UUID,
-        device_name: str = DEFAULT_DEVICE_NAME
+        response_uuid: str = DEFAULT_CHAR_RESPONSE_UUID,
+        device_name: str = DEFAULT_DEVICE_NAME,
     ) -> None:
         self._service_uuid = service_uuid
         self._char_uuid = char_uuid
+        self._response_uuid = response_uuid
         self._device_name = device_name
 
         self._callback: Optional[RawDataCallback] = None
         self._bus: Optional[MessageBus] = None
         self._adapter_path: Optional[str] = None
         self._char_iface: Optional[GattCharacteristic1Interface] = None
+        self._resp_iface: Optional[GattResponseCharacteristic1Interface] = None
         self._is_running = False
 
     @property
@@ -142,6 +185,11 @@ class BluezBleGattServer(IBleGattServer):
         self._callback = callback
         if self._char_iface:
             self._char_iface.callback = callback
+
+    def set_response(self, value: bytes) -> None:
+        """応答キャラクタリスティック値を更新する (ACK/NACK)。"""
+        if self._resp_iface:
+            self._resp_iface.set_value(value)
 
     async def _detect_adapter_path(self, bus: MessageBus) -> str:
         """/org/bluez 配下から利用可能な hciX アダプタを探索する"""
@@ -181,17 +229,26 @@ class BluezBleGattServer(IBleGattServer):
                         "Flags": Variant("as", ["write"]),
                     }
                 },
+                RESP_PATH: {
+                    "org.bluez.GattCharacteristic1": {
+                        "UUID": Variant("s", self._response_uuid),
+                        "Service": Variant("o", SERVICE_PATH),
+                        "Flags": Variant("as", ["read"]),
+                    }
+                },
             }
 
             # D-Bus インターフェースのエクスポート
             om_iface = ObjectManagerInterface(managed_objects)
             svc_iface = GattService1Interface(self._service_uuid)
             self._char_iface = GattCharacteristic1Interface(self._char_uuid, SERVICE_PATH, self._callback)
+            self._resp_iface = GattResponseCharacteristic1Interface(self._response_uuid, SERVICE_PATH)
             adv_iface = LeAdvertisement1Interface(self._service_uuid, self._device_name)
 
             self._bus.export(BASE_APP_PATH, om_iface)
             self._bus.export(SERVICE_PATH, svc_iface)
             self._bus.export(CHAR_PATH, self._char_iface)
+            self._bus.export(RESP_PATH, self._resp_iface)
             self._bus.export(ADV_PATH, adv_iface)
 
             # アダプタプロキシ経由で登録呼び出し
@@ -243,5 +300,6 @@ class BluezBleGattServer(IBleGattServer):
         self._bus = None
         self._adapter_path = None
         self._char_iface = None
+        self._resp_iface = None
         self._is_running = False
         logger.info("BlueZ GATT Server 停止完了")

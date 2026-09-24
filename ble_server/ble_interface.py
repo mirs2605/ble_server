@@ -45,3 +45,11 @@ class IBleGattServer(ABC):
     def is_running(self) -> bool:
         """サーバーが稼働中かどうかを返す。"""
         pass
+
+    def set_response(self, value: bytes) -> None:
+        """送信結果の応答値 (b'ACK' / b'NACK') を保持する。
+
+        アプリはミッション送信後に応答キャラクタリスティックを
+        read するため、受信処理の成否をここに反映させること。
+        応答を返せない実装では何もしない。
+        """

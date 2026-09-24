@@ -1,11 +1,6 @@
-from .ble_interface import IBleGattServer, RawDataCallback
-from .bluez_server import BluezBleGattServer
-from .converter import IPayloadConverter, JsonPolygonConverter
+"""ble_server: BLE GATT server and cleaning-zone conversion.
 
-__all__ = [
-    "IBleGattServer",
-    "RawDataCallback",
-    "BluezBleGattServer",
-    "IPayloadConverter",
-    "JsonPolygonConverter",
-]
+ROS/dbus依存モジュールは再exportしない。各モジュールから直接importすること。
+(``ble_server.chunk_assembler`` 等の純粋モジュールをホストのpytestで
+検証できるようにするため)
+"""

@@ -1,6 +1,4 @@
-"""
-Unit Tests for Payload Converter and BLE Interface
-"""
+"""JSONペイロードの検証とPolygonStampedへの変換契約を検証する。"""
 
 import json
 import pytest
@@ -36,7 +34,7 @@ def test_converter_valid_square():
 
 def test_converter_invalid_points_count():
     converter = JsonPolygonConverter()
-    # 頂点数が2つ（ポリゴンとして成立しない）
+    # 3頂点未満の点列はポリゴンとして拒否する。
     payload = json.dumps({
         "type": "cleaning_zone",
         "polygon": [

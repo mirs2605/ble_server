@@ -18,4 +18,5 @@ colcon build --symlink-install --packages-select ble_server
 ## 注意
 
 - 実機・BlueZ・D-Busが無い環境では `ble_receiver_node` は起動失敗する。手動テストは `enable_ble:=false`
+- コードコメントは [`docs/COMMENT_GUIDE.md`](docs/COMMENT_GUIDE.md) に従う
 - root権限を使う操作はしない

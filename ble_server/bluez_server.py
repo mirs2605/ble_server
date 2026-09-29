@@ -4,9 +4,9 @@ import asyncio
 import logging
 from typing import Optional, Any, Dict
 
-from dbus_fast.aio import MessageBus
+from dbus_fast.aio import MessageBus, ProxyObject
 from dbus_fast.constants import BusType
-from dbus_fast import Variant
+from dbus_fast import Variant, MessageType
 from dbus_fast.service import ServiceInterface, method, dbus_property, PropertyAccess
 
 from .ble_interface import IBleGattServer, RawDataCallback
@@ -117,7 +117,7 @@ class GattResponseCharacteristic1Interface(ServiceInterface):
     @method()
     def ReadValue(self, options: "a{sv}") -> "ay":  # type: ignore[override]
         """現在設定されている処理結果をバイト列で返す。"""
-        return list(self._value)
+        return bytearray(self._value)
 
     @dbus_property(PropertyAccess.READ)
     def UUID(self) -> "s":  # type: ignore[override]
@@ -187,6 +187,7 @@ class BluezBleGattServer(IBleGattServer):
         self._char_iface: Optional[GattCharacteristic1Interface] = None
         self._resp_iface: Optional[GattResponseCharacteristic1Interface] = None
         self._is_running = False
+        self._adapter_proxy: Optional[ProxyObject] = None
 
     @property
     def is_running(self) -> bool:
@@ -278,10 +279,54 @@ class BluezBleGattServer(IBleGattServer):
             await adv_mgr.call_register_advertisement(ADV_PATH, {})
             logger.info(f"BLE Advertisement 開始 (ローカル名: '{self._device_name}')")
 
+            # 切断時に再アドバタイズするためアダプタproxyを保持し、シグナルを購読する
+            self._adapter_proxy = adapter
+            self._bus.add_message_handler(self._on_properties_changed)
+            logger.info("デバイス切断監視を開始しました")
+
             self._is_running = True
         except Exception as e:
             await self.stop()
             raise RuntimeError(f"BLE サーバー起動処理でエラーが発生しました: {e}") from e
+
+    def _on_properties_changed(self, message) -> None:
+        """BlueZのPropertiesChangedシグナルを受け取り、切断時に再アドバタイズする。"""
+        try:
+            # add_message_handler は全メッセージを受け取るので対象シグナルだけ処理する
+            if (message.message_type != MessageType.SIGNAL
+                    or message.interface != "org.freedesktop.DBus.Properties"
+                    or message.member != "PropertiesChanged"):
+                return None
+            # message.body = [interface_name, changed_properties, invalidated_properties]
+            iface_name, changed, _ = message.body
+            if iface_name != "org.bluez.Device1":
+                return None
+            if "Connected" not in changed:
+                return None
+            connected = changed["Connected"].value
+            if not connected:
+                logger.info("デバイス切断を検知しました。アドバタイズを再開します...")
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._restart_advertisement())
+        except Exception as e:
+            logger.warning(f"PropertiesChanged ハンドラで例外: {e}")
+        return None
+
+    async def _restart_advertisement(self) -> None:
+        """切断後にLEアドバタイズを再登録する。"""
+        if not self._bus or not self._adapter_proxy:
+            return
+        try:
+            adv_mgr = self._adapter_proxy.get_interface("org.bluez.LEAdvertisingManager1")
+            try:
+                await adv_mgr.call_unregister_advertisement(ADV_PATH)
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+            await adv_mgr.call_register_advertisement(ADV_PATH, {})
+            logger.info(f"BLE Advertisement 再開 (ローカル名: '{self._device_name}')")
+        except Exception as e:
+            logger.error(f"Advertisement 再開に失敗しました: {e}")
 
     async def stop(self) -> None:
         """登録済み広告とGATTアプリケーションを解除し、D-Bus接続を閉じる。"""
@@ -315,6 +360,7 @@ class BluezBleGattServer(IBleGattServer):
 
         self._bus = None
         self._adapter_path = None
+        self._adapter_proxy = None
         self._char_iface = None
         self._resp_iface = None
         self._is_running = False

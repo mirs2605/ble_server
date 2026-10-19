@@ -1,11 +1,5 @@
-from .ble_interface import IBleGattServer, RawDataCallback
-from .bluez_server import BluezBleGattServer
-from .converter import IPayloadConverter, JsonPolygonConverter
+"""BLE GATT受信と清掃ゾーン変換を提供するROS 2パッケージ。
 
-__all__ = [
-    "IBleGattServer",
-    "RawDataCallback",
-    "BluezBleGattServer",
-    "IPayloadConverter",
-    "JsonPolygonConverter",
-]
+各機能は定義元のモジュールからimportする。ROS 2・D-Busに依存する実装と、
+単独で利用できるデータ処理機能の依存関係を分離する。
+"""

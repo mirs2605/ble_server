@@ -30,6 +30,15 @@ source install/setup.bash
 ros2 run ble_server ble_receiver_node
 ```
 
+他パッケージのlaunchから使う場合は、このパッケージが公開する起動APIをincludeします。
+トピックや時刻設定はlaunch引数で渡せます。
+
+```bash
+ros2 launch ble_server ble_receiver.launch.py \
+  cleaning_zone_topic:=/cleaning_zone initial_pose_topic:=/initialpose \
+  use_sim_time:=false
+```
+
 ## トピック確認
 
 ```bash

@@ -1,4 +1,4 @@
-"""Unit tests for ChunkAssembler (ROS-free, host-runnable)."""
+"""ROS依存のないChunkAssemblerのフレーム再構成契約を検証する。"""
 
 import pytest
 
@@ -46,7 +46,7 @@ def test_overflow_clears_and_raises():
     with pytest.raises(AssemblerOverflowError):
         asm.feed(b'123456789')
     assert asm.pending_bytes == 0
-    # クリア後は再利用できる
+    # 溢れたフレームを破棄した後も次のフレームを受信できる。
     assert asm.feed(b'{}\n') == [b'{}']
 
 

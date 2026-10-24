@@ -4,7 +4,7 @@ BLE GATTサーバ（BlueZ）＋清掃ポリゴン変換。テストはROS環境�
 
 ## ブランチ運用
 
-- `main` / `develop` 直commit・直push禁止。`feature/*` → `develop` → `main` のPRのみ
+- `main` 直commit・直push禁止。`feature/*` → `main` のPRのみ
 - 1コミット1話題
 
 ## テスト・ビルド
@@ -18,4 +18,5 @@ colcon build --symlink-install --packages-select ble_server
 ## 注意
 
 - 実機・BlueZ・D-Busが無い環境では `ble_receiver_node` は起動失敗する。手動テストは `enable_ble:=false`
+- コードコメントは [`docs/COMMENT_GUIDE.md`](docs/COMMENT_GUIDE.md) に従う
 - root権限を使う操作はしない

@@ -1,55 +1,48 @@
-"""
-Abstract BLE GATT Server Interface
-===================================
-Bluetooth / BLE 通信基盤を抽象化し、特定のライブラリ (BlueZ, dbus-fast, mock等) に
-依存しない共通インターフェースおよびデータ型を定義する。
-"""
+"""BLE GATTサーバー実装が満たす共通インターフェースを定義する。"""
 
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-# 受信コールバック型: (生バイト列) -> None
 RawDataCallback = Callable[[bytes], None]
 
 
 class IBleGattServer(ABC):
-    """BLE GATT Server の抽象基底インターフェース"""
+    """BLE GATTサーバーの開始・停止・受信通知・応答値の契約。"""
 
     @abstractmethod
     async def start(self) -> None:
-        """
-        BLE サーバー (アドバタイズおよび GATT サービス) を開始する。
-        
+        """BLEアドバタイズとGATTサービスを開始する。
+
         Raises:
-            RuntimeError: アダプタ未検出または D-Bus 接続失敗時
+            RuntimeError: アダプタ未検出、またはD-Bus接続に失敗した場合。
         """
         pass
 
     @abstractmethod
     async def stop(self) -> None:
-        """BLE サーバー (アドバタイズおよび GATT サービス) を停止しリソースを解放する。"""
+        """BLEアドバタイズとGATTサービスを停止し、通信リソースを解放する。"""
         pass
 
     @abstractmethod
     def set_on_data_received_callback(self, callback: Optional[RawDataCallback]) -> None:
-        """
-        データ受信時に呼び出されるコールバック関数を登録する。
+        """受信ペイロードを通知するコールバックを登録または解除する。
 
         Args:
-            callback: 生データ (bytes) を受け取る Callable、または解除用の None
+            callback: 生バイト列を受け取る関数。Noneを渡すと登録を解除する。
         """
         pass
 
     @property
     @abstractmethod
     def is_running(self) -> bool:
-        """サーバーが稼働中かどうかを返す。"""
+        """GATTサービスとアドバタイズが稼働中ならTrueを返す。"""
         pass
 
     def set_response(self, value: bytes) -> None:
-        """送信結果の応答値 (b'ACK' / b'NACK') を保持する。
+        """クライアントがreadする処理結果を設定する。
 
-        アプリはミッション送信後に応答キャラクタリスティックを
-        read するため、受信処理の成否をここに反映させること。
-        応答を返せない実装では何もしない。
+        Args:
+            value: 成功を示す ``b'ACK'`` または失敗を示す ``b'NACK'``。
+
+        応答Characteristicを持たない実装では何もしない。
         """

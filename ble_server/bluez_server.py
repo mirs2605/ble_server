@@ -1,35 +1,28 @@
-"""
-BlueZ / dbus-fast Implementation of IBleGattServer
-===================================================
-Linux (BlueZ) 上で D-Bus (dbus-fast) を用い、
-GATT Peripheral および LE Advertisement を提供する具象クラス。
-"""
+"""BlueZ D-Busを使ってBLE GATTサービスとLEアドバタイズを提供する。"""
 
 import asyncio
 import logging
 from typing import Optional, Any, Dict
 
-from dbus_fast.aio import MessageBus
+from dbus_fast.aio import MessageBus, ProxyObject
 from dbus_fast.constants import BusType
-from dbus_fast import Variant
+from dbus_fast import Variant, MessageType
 from dbus_fast.service import ServiceInterface, method, dbus_property, PropertyAccess
 
 from .ble_interface import IBleGattServer, RawDataCallback
 
 logger = logging.getLogger(__name__)
 
-# デフォルト UUID (アプリ側 BleUuids と一致させること)
+# UUIDはBLEアプリのBleUuidsと一致させる。
 DEFAULT_SERVICE_UUID      = "12345678-1234-1234-1234-123456789abc"
 DEFAULT_CHAR_MISSION_UUID = "12345678-1234-1234-1234-123456789abd"
 DEFAULT_CHAR_RESPONSE_UUID = "12345678-1234-1234-1234-123456789abe"
 DEFAULT_DEVICE_NAME       = "MIRS-Robot"
 
-#: 応答値。アプリは送信後に response characteristic を read し、
-#: b'ACK' 以外を拒否扱いにする
-RESPONSE_ACK = b"ACK"
-RESPONSE_NACK = b"NACK"
+RESPONSE_ACK = b"ACK"  # ミッションの検証とROS配信が成功したことを示す。
+RESPONSE_NACK = b"NACK"  # ミッションを受理できなかったことを示す。
 
-# D-Bus オブジェクトパス
+# BlueZへ公開するサービス、Characteristic、AdvertisementのObject Path。
 BASE_APP_PATH  = "/com/mirs/app"
 SERVICE_PATH   = f"{BASE_APP_PATH}/service0"
 CHAR_PATH      = f"{SERVICE_PATH}/char0"
@@ -38,37 +31,43 @@ ADV_PATH       = "/com/mirs/advertisement0"
 
 
 class ObjectManagerInterface(ServiceInterface):
-    """org.freedesktop.DBus.ObjectManager 実装 (BlueZ が階層構造を把握するために必要)"""
+    """BlueZへ公開するGATTオブジェクト階層を返すD-Bus ObjectManager。"""
 
     def __init__(self, managed_objects: Dict[str, Dict[str, Dict[str, Variant]]]) -> None:
+        """BlueZへ返すObject Pathとinterfaceの辞書を保持する。"""
         super().__init__("org.freedesktop.DBus.ObjectManager")
         self._objects = managed_objects
 
     @method()
     def GetManagedObjects(self) -> "a{oa{sa{sv}}}":  # type: ignore[override]
+        """BlueZへ公開するObject Pathとinterfaceの辞書を返す。"""
         return self._objects
 
 
 class GattService1Interface(ServiceInterface):
-    """org.bluez.GattService1 実装"""
+    """BLE GATTサービスのUUIDとPrimary属性を公開する。"""
 
     def __init__(self, service_uuid: str) -> None:
+        """公開するGATTサービスのUUIDを設定する。"""
         super().__init__("org.bluez.GattService1")
         self._uuid = service_uuid
 
     @dbus_property(PropertyAccess.READ)
     def UUID(self) -> "s":  # type: ignore[override]
+        """GATTサービスのUUIDを返す。"""
         return self._uuid
 
     @dbus_property(PropertyAccess.READ)
     def Primary(self) -> "b":  # type: ignore[override]
+        """サービスがprimary serviceであることを示す。"""
         return True
 
 
 class GattCharacteristic1Interface(ServiceInterface):
-    """org.bluez.GattCharacteristic1 実装 (WriteValue を処理)"""
+    """ミッションデータを書き込むGATT Characteristicを提供する。"""
 
     def __init__(self, char_uuid: str, service_path: str, callback: Optional[RawDataCallback] = None) -> None:
+        """UUID、所属サービス、書き込み通知先を設定する。"""
         super().__init__("org.bluez.GattCharacteristic1")
         self._uuid = char_uuid
         self._service_path = service_path
@@ -76,6 +75,7 @@ class GattCharacteristic1Interface(ServiceInterface):
 
     @method()
     def WriteValue(self, value: "ay", options: "a{sv}") -> None:  # type: ignore[override]
+        """書き込みバイト列を受信コールバックへ渡す。"""
         raw = bytes(value)
         logger.info(f"📨 WriteValue 受信: {len(raw)} bytes")
         if self.callback:
@@ -86,77 +86,87 @@ class GattCharacteristic1Interface(ServiceInterface):
 
     @dbus_property(PropertyAccess.READ)
     def UUID(self) -> "s":  # type: ignore[override]
+        """CharacteristicのUUIDを返す。"""
         return self._uuid
 
     @dbus_property(PropertyAccess.READ)
     def Service(self) -> "o":  # type: ignore[override]
+        """所属GATTサービスのObject Pathを返す。"""
         return self._service_path
 
     @dbus_property(PropertyAccess.READ)
     def Flags(self) -> "as":  # type: ignore[override]
+        """書き込み可能なCharacteristicであることを示す。"""
         return ["write"]
 
 
 class GattResponseCharacteristic1Interface(ServiceInterface):
-    """応答用キャラクタリスティック (read専用)。
-
-    アプリはミッション送信後にここをreadし、b'ACK' 以外を拒否扱いにする。
-    受信処理の成否は BluezBleGattServer.set_response() で反映させる。
-    """
+    """クライアントが処理結果を読むためのread専用Characteristic。"""
 
     def __init__(self, char_uuid: str, service_path: str) -> None:
+        """応答CharacteristicのUUIDと所属サービスを設定する。"""
         super().__init__("org.bluez.GattCharacteristic1")
         self._uuid = char_uuid
         self._service_path = service_path
         self._value = RESPONSE_NACK
 
     def set_value(self, value: bytes) -> None:
+        """クライアントへ返す応答Characteristicの値を更新する。"""
         self._value = bytes(value)
 
     @method()
     def ReadValue(self, options: "a{sv}") -> "ay":  # type: ignore[override]
-        return list(self._value)
+        """現在設定されている処理結果をバイト列で返す。"""
+        return bytearray(self._value)
 
     @dbus_property(PropertyAccess.READ)
     def UUID(self) -> "s":  # type: ignore[override]
+        """応答CharacteristicのUUIDを返す。"""
         return self._uuid
 
     @dbus_property(PropertyAccess.READ)
     def Service(self) -> "o":  # type: ignore[override]
+        """所属GATTサービスのObject Pathを返す。"""
         return self._service_path
 
     @dbus_property(PropertyAccess.READ)
     def Flags(self) -> "as":  # type: ignore[override]
+        """読み取り専用Characteristicであることを示す。"""
         return ["read"]
 
 
 class LeAdvertisement1Interface(ServiceInterface):
-    """org.bluez.LEAdvertisement1 実装 (BLE 探索用)"""
+    """サービスUUIDとローカル名をアドバタイズするLE Advertisement。"""
 
     def __init__(self, service_uuid: str, local_name: str) -> None:
+        """Advertisementへ含めるサービスUUIDとローカル名を設定する。"""
         super().__init__("org.bluez.LEAdvertisement1")
         self._service_uuid = service_uuid
         self._local_name = local_name
 
     @method()
     def Release(self) -> None:
+        """BlueZがAdvertisementを解放したことを記録する。"""
         logger.info("BlueZ により Advertisement が解放されました。")
 
     @dbus_property(PropertyAccess.READ)
     def Type(self) -> "s":  # type: ignore[override]
+        """広告形式としてperipheralを返す。"""
         return "peripheral"
 
     @dbus_property(PropertyAccess.READ)
     def ServiceUUIDs(self) -> "as":  # type: ignore[override]
+        """アドバタイズ対象のサービスUUIDを返す。"""
         return [self._service_uuid]
 
     @dbus_property(PropertyAccess.READ)
     def LocalName(self) -> "s":  # type: ignore[override]
+        """アドバタイズに含めるローカル名を返す。"""
         return self._local_name
 
 
 class BluezBleGattServer(IBleGattServer):
-    """BlueZ D-Bus API を利用した BLE GATT サーバーの具象実装クラス"""
+    """BlueZ D-Bus APIを使うLinux向けBLE GATTサーバー実装。"""
 
     def __init__(
         self,
@@ -165,6 +175,7 @@ class BluezBleGattServer(IBleGattServer):
         response_uuid: str = DEFAULT_CHAR_RESPONSE_UUID,
         device_name: str = DEFAULT_DEVICE_NAME,
     ) -> None:
+        """サービスUUID、Characteristic UUID、広告名を設定する。"""
         self._service_uuid = service_uuid
         self._char_uuid = char_uuid
         self._response_uuid = response_uuid
@@ -176,23 +187,30 @@ class BluezBleGattServer(IBleGattServer):
         self._char_iface: Optional[GattCharacteristic1Interface] = None
         self._resp_iface: Optional[GattResponseCharacteristic1Interface] = None
         self._is_running = False
+        self._adapter_proxy: Optional[ProxyObject] = None
 
     @property
     def is_running(self) -> bool:
+        """サービス登録と広告が完了していればTrueを返す。"""
         return self._is_running
 
     def set_on_data_received_callback(self, callback: Optional[RawDataCallback]) -> None:
+        """GATT書き込みを通知するコールバックを登録または解除する。"""
         self._callback = callback
         if self._char_iface:
             self._char_iface.callback = callback
 
     def set_response(self, value: bytes) -> None:
-        """応答キャラクタリスティック値を更新する (ACK/NACK)。"""
+        """応答Characteristicの値をACKまたはNACKへ更新する。"""
         if self._resp_iface:
             self._resp_iface.set_value(value)
 
     async def _detect_adapter_path(self, bus: MessageBus) -> str:
-        """/org/bluez 配下から利用可能な hciX アダプタを探索する"""
+        """BlueZ D-Bus階層から最初に見つかったhciアダプタのPathを返す。
+
+        Raises:
+            RuntimeError: BlueZへ接続できない、またはアダプタがない場合。
+        """
         try:
             intr = await bus.introspect("org.bluez", "/org/bluez")
         except Exception as e:
@@ -204,6 +222,7 @@ class BluezBleGattServer(IBleGattServer):
         raise RuntimeError("Bluetooth アダプタ (hci0 等) が検出できませんでした。Bluetooth が有効か確認してください。")
 
     async def start(self) -> None:
+        """GATTサービスをBlueZへ登録し、LEアドバタイズを開始する。"""
         if self._is_running:
             logger.warning("BLE サーバーは既に起動しています。")
             return
@@ -214,7 +233,6 @@ class BluezBleGattServer(IBleGattServer):
             self._adapter_path = await self._detect_adapter_path(self._bus)
             logger.info(f"Bluetooth アダプタ検出: {self._adapter_path}")
 
-            # Managed Objects 辞書の作成
             managed_objects = {
                 SERVICE_PATH: {
                     "org.bluez.GattService1": {
@@ -238,7 +256,6 @@ class BluezBleGattServer(IBleGattServer):
                 },
             }
 
-            # D-Bus インターフェースのエクスポート
             om_iface = ObjectManagerInterface(managed_objects)
             svc_iface = GattService1Interface(self._service_uuid)
             self._char_iface = GattCharacteristic1Interface(self._char_uuid, SERVICE_PATH, self._callback)
@@ -251,7 +268,6 @@ class BluezBleGattServer(IBleGattServer):
             self._bus.export(RESP_PATH, self._resp_iface)
             self._bus.export(ADV_PATH, adv_iface)
 
-            # アダプタプロキシ経由で登録呼び出し
             intr = await self._bus.introspect("org.bluez", self._adapter_path)
             adapter = self._bus.get_proxy_object("org.bluez", self._adapter_path, intr)
 
@@ -263,12 +279,57 @@ class BluezBleGattServer(IBleGattServer):
             await adv_mgr.call_register_advertisement(ADV_PATH, {})
             logger.info(f"BLE Advertisement 開始 (ローカル名: '{self._device_name}')")
 
+            # 切断時に再アドバタイズするためアダプタproxyを保持し、シグナルを購読する
+            self._adapter_proxy = adapter
+            self._bus.add_message_handler(self._on_properties_changed)
+            logger.info("デバイス切断監視を開始しました")
+
             self._is_running = True
         except Exception as e:
             await self.stop()
             raise RuntimeError(f"BLE サーバー起動処理でエラーが発生しました: {e}") from e
 
+    def _on_properties_changed(self, message) -> None:
+        """BlueZのPropertiesChangedシグナルを受け取り、切断時に再アドバタイズする。"""
+        try:
+            # add_message_handler は全メッセージを受け取るので対象シグナルだけ処理する
+            if (message.message_type != MessageType.SIGNAL
+                    or message.interface != "org.freedesktop.DBus.Properties"
+                    or message.member != "PropertiesChanged"):
+                return None
+            # message.body = [interface_name, changed_properties, invalidated_properties]
+            iface_name, changed, _ = message.body
+            if iface_name != "org.bluez.Device1":
+                return None
+            if "Connected" not in changed:
+                return None
+            connected = changed["Connected"].value
+            if not connected:
+                logger.info("デバイス切断を検知しました。アドバタイズを再開します...")
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._restart_advertisement())
+        except Exception as e:
+            logger.warning(f"PropertiesChanged ハンドラで例外: {e}")
+        return None
+
+    async def _restart_advertisement(self) -> None:
+        """切断後にLEアドバタイズを再登録する。"""
+        if not self._bus or not self._adapter_proxy:
+            return
+        try:
+            adv_mgr = self._adapter_proxy.get_interface("org.bluez.LEAdvertisingManager1")
+            try:
+                await adv_mgr.call_unregister_advertisement(ADV_PATH)
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+            await adv_mgr.call_register_advertisement(ADV_PATH, {})
+            logger.info(f"BLE Advertisement 再開 (ローカル名: '{self._device_name}')")
+        except Exception as e:
+            logger.error(f"Advertisement 再開に失敗しました: {e}")
+
     async def stop(self) -> None:
+        """登録済み広告とGATTアプリケーションを解除し、D-Bus接続を閉じる。"""
         if not self._bus:
             return
 
@@ -299,6 +360,7 @@ class BluezBleGattServer(IBleGattServer):
 
         self._bus = None
         self._adapter_path = None
+        self._adapter_proxy = None
         self._char_iface = None
         self._resp_iface = None
         self._is_running = False

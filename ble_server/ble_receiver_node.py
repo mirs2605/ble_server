@@ -1,71 +1,95 @@
 #!/usr/bin/env python3
-"""
-BLE Cleaning Zone Receiver ROS 2 Node
-======================================
-スマホから BLE 経由で送信された清掃エリア (Polygon JSON) を受信し、
-/cleaning_zone (geometry_msgs/msg/PolygonStamped) トピックに安全に配信するノード。
+"""BLEメッセージを受信し、型に応じたROS 2トピックへ配信する。
 
-【設計方針】
-- BLE 通信 (IBleGattServer) と メッセージ変換 (IPayloadConverter) を完全に抽象化・疎結合化
-- ROS 2 パラメータにより トピック名・フレームID・UUID・デバイス名 などを設定可能
-- 非同期 BLE イベントループと ROS 2 の spin を安全に並行管理
+設計方針
+--------
+* ノードはメッセージの解釈を一切知らない。変換・トピック名の決定は
+  :class:`~ble_server.converter.DispatcherConverter` に委ねる。
+* 新しいメッセージ型を追加するには ``converter.py`` にコンバーターを
+  追加して ``build_default_dispatcher`` に登録するだけでよく、
+  このノードは変更不要。
 """
 
 import asyncio
 import sys
 import threading
-from typing import Optional
+from typing import Dict, Optional
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PolygonStamped
+from rclpy.publisher import Publisher
 
 from ble_server.ble_interface import IBleGattServer
 from ble_server.bluez_server import RESPONSE_ACK, RESPONSE_NACK, BluezBleGattServer
 from ble_server.chunk_assembler import AssemblerOverflowError, ChunkAssembler
-from ble_server.converter import IPayloadConverter, JsonPolygonConverter
+from ble_server.converter import DispatcherConverter, build_default_dispatcher
 
 
 class BleReceiverNode(Node):
-    """BLE 経由で清掃エリアを受信・発行する ROS 2 ノード"""
+    """BLEフレームを受信し、 :class:`DispatcherConverter` 経由でpublishするROS 2ノード。
+
+    配信先トピックとメッセージ型はコンバーターが返す :class:`ConvertResult`
+    から動的に決定する。未知のトピックが現れた際は自動でpublisherを生成する。
+    """
 
     def __init__(
         self,
         ble_server: IBleGattServer,
-        converter: IPayloadConverter | None = None,
+        dispatcher: Optional[DispatcherConverter] = None,
     ) -> None:
+        """受信ノードを初期化する。
+
+        Args:
+            ble_server: BLE受信と応答を担当するGATTサーバー。
+            dispatcher: ペイロードをディスパッチするコンバーター。
+                省略時は :func:`~ble_server.converter.build_default_dispatcher`
+                をROSパラメータで構成して使う。
+        """
         super().__init__('ble_receiver_node')
 
         self._ble_server = ble_server
 
-        # 1. ROS 2 パラメータ宣言
-        self.declare_parameter('topic_name', '/cleaning_zone')
         self.declare_parameter('default_frame_id', 'map')
         self.declare_parameter('max_coord_limit_m', 1000.0)
+        # 各メッセージ型の配信先トピック名。既定値はコンバーターの定数と合わせる。
+        self.declare_parameter('cleaning_zone_topic', '/cleaning_zone')
+        self.declare_parameter('initial_pose_topic', '/initialpose')
 
-        topic_name = self.get_parameter('topic_name').get_parameter_value().string_value
         default_frame_id = self.get_parameter('default_frame_id').get_parameter_value().string_value
         max_coord = self.get_parameter('max_coord_limit_m').get_parameter_value().double_value
+        cleaning_zone_topic = self.get_parameter('cleaning_zone_topic').get_parameter_value().string_value
+        initial_pose_topic = self.get_parameter('initial_pose_topic').get_parameter_value().string_value
 
-        # converter未指定時はノードパラメータで構築する
-        # (max_coord_limit_m が実際に効くようにするため)
-        self._converter = converter or JsonPolygonConverter(
+        self._dispatcher = dispatcher or build_default_dispatcher(
             default_frame_id=default_frame_id,
             max_coord_abs_val=max_coord,
+            cleaning_zone_topic=cleaning_zone_topic,
+            initial_pose_topic=initial_pose_topic,
         )
-        # チャンク再構成 (アプリはJSON+改行をMTU分割送信する)
         self._assembler = ChunkAssembler()
 
-        # 2. Publisher 生成 (QoS 信頼性重視: Depth 10)
-        self._zone_pub = self.create_publisher(PolygonStamped, topic_name, 10)
+        # トピック名 → Publisher のキャッシュ。
+        # ConvertResult が返すトピックが増えるたびに自動で追加する。
+        # 注意: rclpy.Node が内部で self._publishers (list) を使うため、
+        #       名前が衝突しないよう _pub_cache と命名する。
+        self._pub_cache: Dict[str, Publisher] = {}
 
-        self.get_logger().info(f"🚀 BLE Receiver Node 起動: 配信トピック = '{topic_name}' (Default Frame: '{default_frame_id}')")
+        self.get_logger().info(
+            f"🚀 BLE Receiver Node 起動 "
+            f"(Default Frame: '{default_frame_id}', "
+            f"登録済みtype: {self._dispatcher.registered_types}, "
+            f"cleaning_zone→'{cleaning_zone_topic}', "
+            f"initial_pose→'{initial_pose_topic}')"
+        )
 
-        # 3. コールバック登録
         self._ble_server.set_on_data_received_callback(self._on_ble_data_received)
 
+    # ------------------------------------------------------------------
+    # BLE受信コールバック
+    # ------------------------------------------------------------------
+
     def _on_ble_data_received(self, raw_bytes: bytes) -> None:
-        """BLE WriteValue受信ハンドラ。チャンクを蓄積し、完成フレームのみ処理する。"""
+        """WriteValueチャンクを再構成し、完成フレームの結果を応答値へ反映する。"""
         try:
             frames = self._assembler.feed(raw_bytes)
         except AssemblerOverflowError as e:
@@ -73,43 +97,61 @@ class BleReceiverNode(Node):
             self._ble_server.set_response(RESPONSE_NACK)
             return
         if not frames:
-            return  # まだ断片のみ。続きを待つ
+            return
         ok = True
         for frame in frames:
             if not self._handle_frame(frame):
                 ok = False
-        # アプリは送信後に応答characteristicをreadする
         self._ble_server.set_response(RESPONSE_ACK if ok else RESPONSE_NACK)
 
     def _handle_frame(self, frame: bytes) -> bool:
-        """完成した1フレームを変換・配信する。成功時True。"""
+        """完成フレームをディスパッチ・配信し、成功時はTrueを返す。"""
         self.get_logger().info(f'📥 フレーム受信: {len(frame)} bytes')
 
         current_time = self.get_clock().now().to_msg()
-        polygon_msg = self._converter.convert_cleaning_zone(frame, stamp=current_time)
+        result = self._dispatcher.dispatch(frame, stamp=current_time)
 
-        if polygon_msg is not None:
-            self._zone_pub.publish(polygon_msg)
-            points_count = len(polygon_msg.polygon.points)
-            frame_id = polygon_msg.header.frame_id
-            self.get_logger().info(
-                f"📢 清掃エリア配信完了: トピック='{self._zone_pub.topic_name}', 頂点数={points_count}, frame='{frame_id}'"
+        if result is None:
+            self.get_logger().error(
+                "❌ 受信データのパース・検証に失敗したため、トピックへの配信を中断しました。"
             )
-            return True
-        self.get_logger().error("❌ 受信データのパース・検証に失敗したため、トピックへの配信を中断しました。")
-        return False
+            return False
 
+        pub = self._get_or_create_publisher(result.topic, type(result.message))
+        pub.publish(result.message)
+        self.get_logger().info(
+            f"📢 配信完了: topic='{result.topic}', type='{type(result.message).__name__}'"
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # Publisher キャッシュ
+    # ------------------------------------------------------------------
+
+    def _get_or_create_publisher(self, topic: str, msg_type) -> Publisher:
+        """トピック名に対応するpublisherを返す。未登録なら生成してキャッシュする。"""
+        if topic not in self._pub_cache:
+            self._pub_cache[topic] = self.create_publisher(msg_type, topic, 10)
+            self.get_logger().info(f"📌 Publisher を生成しました: '{topic}' ({msg_type.__name__})")
+        return self._pub_cache[topic]
+
+
+# ---------------------------------------------------------------------------
+# BLEサーバースレッド管理（変更なし）
+# ---------------------------------------------------------------------------
 
 class BleServerManager:
-    """BLE サーバーの asyncio イベントループをスレッドセーフに管理するマネージャクラス"""
+    """BLEサーバー用asyncioループを専用スレッドで開始・停止する。"""
 
     def __init__(self, ble_server: IBleGattServer, logger=None) -> None:
+        """BLEサーバーと任意のROS loggerをイベントループ管理へ結び付ける。"""
         self._server = ble_server
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._logger = logger
 
     def start(self) -> None:
+        """イベントループ用スレッドを開始する。"""
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -120,6 +162,7 @@ class BleServerManager:
         self._thread.start()
 
     def _run_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """BLEサーバーを起動し、停止要求までイベントを処理する。"""
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self._server.start())
@@ -138,27 +181,28 @@ class BleServerManager:
             loop.close()
 
     def stop(self) -> None:
+        """イベントループへ停止を通知し、スレッド終了を最大3.0s待つ。"""
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
 
 
+# ---------------------------------------------------------------------------
+# エントリーポイント
+# ---------------------------------------------------------------------------
+
 def main(args=None) -> None:
+    """BLE受信ノードとBlueZサーバーを起動し、ROS 2 spinを実行する。"""
     rclpy.init(args=args)
 
-    # 1. コンポーネント生成 (依存性注入: DI)
     ble_server: IBleGattServer = BluezBleGattServer()
-    converter: IPayloadConverter = JsonPolygonConverter()
 
-    # 2. ノード生成
-    node = BleReceiverNode(ble_server=ble_server, converter=converter)
+    node = BleReceiverNode(ble_server=ble_server)
 
-    # 3. BLE サーバーマネージャ起動
     manager = BleServerManager(ble_server=ble_server, logger=node.get_logger())
     manager.start()
 
-    # 4. ROS 2 Spin
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

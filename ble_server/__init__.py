@@ -1,6 +1,5 @@
-"""ble_server: BLE GATT server and cleaning-zone conversion.
+"""BLE GATT受信と清掃ゾーン変換を提供するROS 2パッケージ。
 
-ROS/dbus依存モジュールは再exportしない。各モジュールから直接importすること。
-(``ble_server.chunk_assembler`` 等の純粋モジュールをホストのpytestで
-検証できるようにするため)
+各機能は定義元のモジュールからimportする。ROS 2・D-Busに依存する実装と、
+単独で利用できるデータ処理機能の依存関係を分離する。
 """

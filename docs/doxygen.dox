@@ -1,0 +1,69 @@
+/** @mainpage ble_server
+
+BLEで受け取ったJSONを清掃範囲と初期姿勢のROSメッセージへ変換する。分割受信、入力検証、BlueZとの接続を含む。
+
+各ファイルの説明からソースと宣言を参照できる。C/C++・Arduino・Python・JavaはDoxygenで解析する。Dart・Kotlin・ROS型定義・シェルはソース掲載ページを使う。コメントのない関数も一覧に含むが、その動作が説明済みという意味ではない。
+
+@section source_list ファイル一覧
+
+- @ref ble_server/__init__.py "ble_server/__init__.py"
+
+- @ref ble_server/ble_interface.py "ble_server/ble_interface.py"
+
+- @ref ble_server/ble_receiver_node.py "ble_server/ble_receiver_node.py"
+
+- @ref ble_server/bluez_server.py "ble_server/bluez_server.py"
+
+- @ref ble_server/chunk_assembler.py "ble_server/chunk_assembler.py"
+
+- @ref ble_server/converter.py "ble_server/converter.py"
+
+- @ref launch/ble_receiver.launch.py "launch/ble_receiver.launch.py"
+
+- @ref setup.py "setup.py"
+
+- @ref test/test_chunk_assembler.py "test/test_chunk_assembler.py"
+
+- @ref test/test_converter.py "test/test_converter.py"
+
+*/
+
+/** @file ble_server/__init__.py
+ * @brief BLE GATT受信と清掃ゾーン変換を提供するROS 2パッケージ。
+ */
+
+/** @file ble_server/ble_interface.py
+ * @brief BLE GATTサーバー実装が満たす共通インターフェースを定義する。
+ */
+
+/** @file ble_server/ble_receiver_node.py
+ * @brief BLEメッセージを受信し、型に応じたROS 2トピックへ配信する。
+ */
+
+/** @file ble_server/bluez_server.py
+ * @brief BlueZ D-Busを使ってBLE GATTサービスとLEアドバタイズを提供する。
+ */
+
+/** @file ble_server/chunk_assembler.py
+ * @brief BLE WriteValueで分割受信した改行区切りフレームを再構成する。
+ */
+
+/** @file ble_server/converter.py
+ * @brief BLEペイロードを検証し、ROS 2メッセージへ変換する。
+ */
+
+/** @file launch/ble_receiver.launch.py
+ * @brief BLEの受信処理を起動し、受信内容を変換してROSトピックへ配信する。
+ */
+
+/** @file setup.py
+ * @brief PythonのROSパッケージと実行コマンドの登録情報を定義する。
+ */
+
+/** @file test/test_chunk_assembler.py
+ * @brief ROS依存のないChunkAssemblerのフレーム再構成契約を検証する。
+ */
+
+/** @file test/test_converter.py
+ * @brief JSONペイロードの検証とROSメッセージへの変換契約を検証する。
+ */

@@ -1,4 +1,4 @@
-"""Start the BLE GATT receiver and route converted messages to ROS topics."""
+"""BLEの受信処理を起動し、受信内容を変換してROSトピックへ配信する。"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument

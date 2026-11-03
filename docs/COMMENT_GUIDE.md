@@ -32,4 +32,4 @@ AI・第三者が文脈なしで読めることを目的とする。対象は `b
 
 ## 5. API文書の生成
 
-Doxygenは未導入である。導入するまでは、READMEのtopic・UUID・データ形式の記述を利用者向け文書の正本とする。
+パッケージのルートで `doxygen Doxyfile` を実行する。HTMLは `docs/generated/html/index.html` に生成する。ファイルの説明は `docs/doxygen.dox`、関数・クラスの説明はソースのdocstringで管理する。READMEのtopic・UUID・データ形式の記述は運用手順と併用する。
